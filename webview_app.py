@@ -21,7 +21,7 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.browser = QWebEngineView()
         self.setCentralWidget(self.browser)
-        self.browser.load(QUrl("https://www.x-corobot.com/queue/?clientId=010100860028240614000068"))
+        self.browser.load(QUrl("https://www.example.com"))
 
 def main():
     if "--silent" not in sys.argv:
