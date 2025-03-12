@@ -1,1 +1,3 @@
-windows配置下写的咖啡机的前端代码，其中网址可以由自己变换，其中的一些组件要自己配置
+webview_app是windows配置下写的咖啡机的前端代码，其中网址可以由自己变换，其中的一些组件要自己配置
+web.py是linux系统可以正常运行的版本
+其中特别要注意的是，在windows系统下Python3.10以上系统WebEngine组件可以用，但是在linux系统里WebEngine组件配置不了，原因是不不支持python3.10以上的版本，因此在linux系统里跳转网页我们用的pyside6组件来代替。
