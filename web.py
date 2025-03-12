@@ -23,7 +23,7 @@ class MainWindow(QMainWindow):
         self.browser = QWebEngineView()
         self.setCentralWidget(self.browser)
         # 加载目标网页
-        self.browser.setUrl(QUrl("https://www.x-corobot.com/queue/?clientId=010100860028240614000068"))
+        self.browser.setUrl(QUrl("https://www.example.com"))
 
 def main():
     # 非静默模式且非管理员权限时，请求提权（仅Windows）
