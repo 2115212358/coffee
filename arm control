@@ -89,6 +89,26 @@ public class MainActivity extends AppCompatActivity {
             tvJointAngles[i] = findViewById(tvIds[i]);
             pbJoints[i] = findViewById(pbIds[i]);
         }
+
+        //初始化部分按钮为不可用状态
+        updateUI(()->{
+            //连接按钮保持可用，其他按钮为灰色
+            btnConnect.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#4CAF50")));
+
+            //初始化其他按钮为灰色
+            ColorStateList disableColor = ColorStateList.valueOf(Color.GRAY);
+            btnPowerOn.setBackgroundTintList(disableColor);
+            btnEnableRobot.setBackgroundTintList(disableColor);
+            btnStartReset.setBackgroundTintList(disableColor);
+            btnEmergencyStop.setBackgroundTintList(disableColor);
+
+            //设置初始化文本
+            btnPowerOn.setText("打开电源");
+            btnEnableRobot.setText("机器人上使能");
+            btnStartReset.setText("开始复位");
+            btnEmergencyStop.setText("紧急停止");
+
+        });
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -148,11 +168,9 @@ public class MainActivity extends AppCompatActivity {
                                     isPowerOn = !isPowerOn;
                                     updateUI(() -> {
                                         // 更新电源按钮样式
-                                        btnPowerOn.setBackgroundTintList(
-                                                isPowerOn ? ColorStateList.valueOf(Color.GRAY)
-                                                        : ColorStateList.valueOf(Color.parseColor("#4CAF50"))
-                                        );
-                                        btnPowerOn.setText(isPowerOn ? "电源已开启" : "打开电源");
+                                        btnPowerOn.setBackgroundTintList(isPowerOn ? ColorStateList.valueOf(Color.parseColor("#20B2AA"))
+                                                : ColorStateList.valueOf(Color.parseColor("#4CAF50")));
+                                        btnPowerOn.setText(isPowerOn ? "关闭电源" : "打开电源");
 
                                         // 刷新所有按钮状态
                                         enableControls(true);
@@ -216,11 +234,9 @@ public class MainActivity extends AppCompatActivity {
                                     isEnableRobot = !isEnableRobot;
                                     updateUI(() -> {
                                         //更新使能按钮样式
-                                        btnEnableRobot.setBackgroundTintList(
-                                                isEnableRobot ? ColorStateList.valueOf(Color.GRAY)
-                                                        : ColorStateList.valueOf(Color.parseColor("4CAF50"))
-                                        );
-                                        btnEnableRobot.setText(isEnableRobot ? "已使能" : "机器人上使能");
+                                        btnEnableRobot.setBackgroundTintList(isEnableRobot ? ColorStateList.valueOf(Color.parseColor("#20B2AA"))
+                                                        : ColorStateList.valueOf(Color.parseColor("#4CAF50")));
+                                        btnEnableRobot.setText(isEnableRobot ? "机器人下使能" : "机器人上使能");
                                         enableControls(true);
                                     });
                                 }
@@ -596,9 +612,6 @@ public class MainActivity extends AppCompatActivity {
             try {
                 // 创建Socket连接
                 commandSocket = new Socket();
-                commandSocket.setSendBufferSize(64 * 1024);
-                commandSocket.setReceiveBufferSize(64 * 1024);
-
                 commandSocket.connect(new InetSocketAddress(currentArmIp, CONTROL_PORT), 3000);
                 commandOutput = new DataOutputStream(commandSocket.getOutputStream());
                 isConnected = true;
@@ -739,10 +752,17 @@ public class MainActivity extends AppCompatActivity {
                 tvStatus.setText("未连接");
                 enableControls(false);
 
-                //重置电源和使能按钮状态
-                btnPowerOn.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#4CAF50")));
+                //重置按钮状态
+                ColorStateList enabledColor = ColorStateList.valueOf(Color.parseColor("#4CAF50"));
+                ColorStateList disenabledColor = ColorStateList.valueOf(Color.GRAY);
+
+                btnConnect.setBackgroundTintList(enabledColor);
+                btnPowerOn.setBackgroundTintList(disenabledColor);
+                btnStartReset.setBackgroundTintList(disenabledColor);
+                btnEmergencyStop.setBackgroundTintList(disenabledColor);
+
+                //重置文本信息
                 btnPowerOn.setText("打开电源");
-                btnEnableRobot.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#4CAF50")));
                 btnEnableRobot.setText("机器人上使能");
             });
         } catch (Exception e) {
@@ -769,6 +789,32 @@ public class MainActivity extends AppCompatActivity {
             //开始复位和断开连接仅在电源和使能按钮打开后使用
             btnStartReset.setEnabled(isConnected && isPowerOn && isEnableRobot);
             btnEmergencyStop.setEnabled(isConnected);
+
+            ColorStateList enabledColor = ColorStateList.valueOf(Color.parseColor("#4CAF50"));//绿色
+            ColorStateList disabledColor = ColorStateList.valueOf(Color.GRAY);
+            ColorStateList activeColor = ColorStateList.valueOf(Color.parseColor("#20B2AA"));//蓝色
+
+            //连接按钮始终可用
+            btnConnect.setBackgroundTintList(isConnected ? ColorStateList.valueOf(Color.parseColor("#20B2AA")) : enabledColor);
+            btnConnect.setText(isConnected ? "断开连接" : "连接");
+
+            //电源按钮连接后可用
+            btnPowerOn.setEnabled(isConnected);
+            btnPowerOn.setBackgroundTintList(isConnected ? (isPowerOn ? activeColor : enabledColor) : disabledColor);
+            btnPowerOn.setText(isPowerOn ? "关闭电源" : "打开电源");
+
+            //使能按钮电源开启后可用
+            btnEnableRobot.setEnabled(isConnected);
+            btnEnableRobot.setBackgroundTintList((isConnected && isPowerOn) ? (isEnableRobot ? activeColor : enabledColor) : disabledColor);
+            btnEnableRobot.setText(isEnableRobot ? "机器人下使能" : "机器人上使能");
+
+            //开始复位按钮使能后可用
+            btnStartReset.setEnabled(isConnected && isPowerOn && isEnableRobot);
+            btnStartReset.setBackgroundTintList((isConnected && isPowerOn && isEnableRobot) ? enabledColor : disabledColor);
+
+            //紧急停止按钮连接后可用
+            btnEmergencyStop.setEnabled(isConnected);
+            btnEmergencyStop.setBackgroundTintList(isConnected ? ColorStateList.valueOf(Color.RED) : disabledColor);
         });
     }
 
@@ -830,5 +876,4 @@ public class MainActivity extends AppCompatActivity {
             pbJoints[i].setProgress((int) angle);
         }
     }
-
 }
