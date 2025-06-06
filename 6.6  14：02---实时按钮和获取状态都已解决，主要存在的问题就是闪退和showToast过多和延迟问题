@@ -1,0 +1,1530 @@
+package com.example.myapplication;
+
+import android.annotation.SuppressLint;
+import android.app.AlertDialog;
+import android.app.Service;
+import android.content.Intent;
+import android.content.res.ColorStateList;
+import android.graphics.Color;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.MotionEvent;
+import android.widget.Button;
+import android.widget.ProgressBar;
+import android.widget.RadioGroup;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.appcompat.app.AppCompatActivity;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.net.ConnectException;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.net.InetSocketAddress;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import android.util.Log;
+import com.google.gson.Gson;
+import androidx.core.content.ContextCompat;
+import android.view.MotionEvent;
+
+public class MainActivity extends AppCompatActivity {
+    private int activeColor;
+    private int enabledColor;
+    private int disabledColor;
+
+    //UI组件
+    private Button btnConnect;
+    private TextView tvStatus;
+
+
+    //网络相关变量
+    private Socket commandSocket;
+    private DataOutputStream commandOutput;
+    private BufferedReader reader;
+    private ExecutorService executor = Executors.newSingleThreadExecutor();
+    private Handler handler = new Handler(Looper.getMainLooper());
+
+    //开始复位和紧急停止按钮
+    private Button btnStartReset;
+    private Button btnEmergencyStop;
+
+    //打开电源和机器人上使能
+    private Button btnPowerOn;
+    private Button btnEnableRobot;
+
+    //连接状态
+    private boolean isConnected = false;
+
+    //电源和使能状态
+    private volatile boolean isPowerOn = false;
+    private volatile boolean isEnableRobot = false;
+
+    private ExecutorService movementExecutor = Executors.newSingleThreadExecutor();
+    private volatile boolean isRestOn = false;
+
+    private volatile boolean isMoving = false;
+
+    //重启服务器按钮
+    private Button btnRebootServer;
+
+    //退出按钮
+    private Button btnQuit;
+
+    //固定左右臂的IP地址
+    private final String LEFT_ARM_IP="10.168.1.30";
+    private final String RIGHT_ARM_IP="10.168.1.35";
+    private String currentArmIp=RIGHT_ARM_IP;//默认右臂
+
+    // 长按检测
+    private volatile boolean isLongPress = false;
+    private volatile boolean isEmergencyStopEnabled = false;
+    private Handler longPressHandler = new Handler(Looper.getMainLooper());
+    private static final int LONG_PRESS_TIMEOUT = 500; // 长按阈值500ms
+    private volatile boolean isLongPressTriggered = false;
+
+    private volatile boolean isResetting = false;
+    private volatile boolean isEmergencyStopped = false;
+
+
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        // 初始化颜色资源
+        activeColor = ContextCompat.getColor(this, R.color.color_active);
+        enabledColor = ContextCompat.getColor(this, R.color.color_enabled);
+        disabledColor = ContextCompat.getColor(this, R.color.color_disabled);
+
+        setupViews();//初始化试图
+        setupButtonListeners(); //设置事件监听器
+        setupRadioGroupListener();
+        updateJointAnglesDisplay();//初始化显示
+        resetIdleTimer();// 初始化空闲计时器
+    }
+
+
+    private void setupViews() {
+        btnConnect = findViewById(R.id.btn_connect);
+        tvStatus = findViewById(R.id.tv_status);
+
+        //绑定按钮(开始复位,紧急停止,重启服务器和退出)
+        btnStartReset = findViewById(R.id.btn_start_reset);
+        btnEmergencyStop = findViewById(R.id.btn_emergency_stop);
+        btnRebootServer = findViewById(R.id.btn_reboot_server);
+        btnQuit = findViewById(R.id.btn_quit);
+
+        //选择左右机械臂按钮
+        radioGroupArm = findViewById(R.id.radioGroupArm);
+        radioGroupArm.check(R.id.rb_right_arm);//默认选中右臂
+        currentArmIp = RIGHT_ARM_IP;
+
+        //打开电源和机械臂使能
+        btnPowerOn = findViewById(R.id.btn_power_on);
+        btnEnableRobot = findViewById(R.id.btn_enable_robot);
+
+        //初始化关节角度TextView和进度条ProgressBar
+        int[] tvIds = {R.id.tv_joint1, R.id.tv_joint2, R.id.tv_joint3, R.id.tv_joint4, R.id.tv_joint5, R.id.tv_joint6};
+        int[] pbIds = {R.id.pb_joint1, R.id.pb_joint2, R.id.pb_joint3, R.id.pb_joint4, R.id.pb_joint5, R.id.pb_joint6};
+
+        for (int i = 0; i < 6; i++) {
+            tvJointAngles[i] = findViewById(tvIds[i]);
+            pbJoints[i] = findViewById(pbIds[i]);
+        }
+
+        //初始化部分按钮为不可用状态
+        updateUI(()->{
+            //连接按钮保持可用，其他按钮为灰色
+            btnConnect.setBackgroundTintList(ColorStateList.valueOf(enabledColor));
+
+            //初始化其他按钮为灰色
+            ColorStateList disableColor = ColorStateList.valueOf(disabledColor);
+            btnPowerOn.setBackgroundTintList(disableColor);
+            btnEnableRobot.setBackgroundTintList(disableColor);
+            btnStartReset.setBackgroundTintList(disableColor);
+            btnEmergencyStop.setEnabled(false);
+            btnEmergencyStop.setBackgroundTintList(disableColor);
+
+            //设置初始化文本
+            btnPowerOn.setText("打开电源");
+            btnEnableRobot.setText("机器人上使能");
+            btnStartReset.setText("开始复位");
+            btnStartReset.setText("复位/急停");
+            btnEmergencyStop.setText("紧急停止");
+            btnQuit.setText("退出");
+        });
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private void setupButtonListeners() {
+        //连接按钮
+        btnConnect.setOnClickListener(v -> {
+            if (isConnected) {
+                disconnect();
+            } else {
+                attemptConnection();
+            }
+        });
+
+        //打开电源和机器人上使能监听
+        btnPowerOn.setOnClickListener(v -> {
+            resetIdleTimer();
+            handlePowerControl();
+        });
+        btnEnableRobot.setOnClickListener(v -> {
+            resetIdleTimer();
+            handleEnableRobotControl();
+        });
+
+        //复位/急停按钮 - 使用Touch事件检测长短按
+        btnStartReset.setOnTouchListener((v, event) -> {
+//            Log.e("Touch","event.getAction()："+event.getAction());
+            resetIdleTimer();
+
+            switch (event.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                    Log.d("TouchEvent", "按下事件");
+                    handlerStartReset();
+
+                    // 按下时启动长按检测
+                    longPressHandler.postDelayed(longPressRunnable, LONG_PRESS_TIMEOUT);
+                    return true;
+
+                case MotionEvent.ACTION_UP:
+                    Log.d("TouchEvent", "松开事件, isResetting: " + isResetting);
+                    handlerEmergencyStop();
+                    isResetting = false;
+//                    handlerStop();
+
+                    // 无论是否长按，都发送紧急停止
+                    if (!isResetting) {
+                        handlerEmergencyStop();
+//                        handlerStop();
+
+                        //如果长按后的松开，额外处理
+                        if (isLongPressTriggered){
+                            Log.e("Touch","长按后松开，已发送紧急停止");
+                        }
+                    }
+                    return true;
+            }
+            return false;
+        });
+
+        //紧急按钮监听
+        btnEmergencyStop.setOnClickListener(v -> {
+            resetIdleTimer();
+            handlerEmergencyStop();
+        });
+
+        // 重启服务器按钮监听
+        btnRebootServer.setOnClickListener(v -> {
+            resetIdleTimer();
+            //restartPlatformServer();
+        });
+
+        //退出按钮监听
+        btnQuit.setOnClickListener(v ->{
+            resetIdleTimer();
+            if (isConnected){
+                //如果已连接，就先发送退出命令
+                sendQuitCommandToServer();
+            }else{
+                showExitConfirmationDialog();
+            }
+        });
+    }
+
+    // 长按执行复位指令
+    private final Runnable longPressRunnable =()-> {
+       Log.e("Touch","长按触发");
+            isLongPress = true;
+            isLongPressTriggered=true;//标记长按已触发
+            handlerStartReset();
+
+    };
+
+//    //实现紧急停止功能
+//    private void handlerStop(){
+//        if (!isConnected){
+//            Log.d("HandlerStop", "未连接机械臂");
+//            showToast("请先连接机械臂");
+//            return;
+//        }
+//        Log.e("HandlerStop", "准备发送停止命令");
+//
+//        // 更新状态
+//        isEmergencyStopped = true;
+//        isResetting = false;
+//
+//        executor.execute(()->{
+//            try {
+//                Log.d("HandlerStop", "执行线程开始");
+//                //发送停止命令
+//                sendCommand(new Gson().toJson(new BaseCMD("stop_program")));
+//                Log.d("HandlerStop", "命令已发送");
+//
+//                //立即更新状态
+//                isMoving = false;
+//
+//                updateUI(()->{
+//                    Log.d("HandlerStop", "更新UI");
+//                    tvStatus.append("\n机械臂已紧急停止");
+//                    showToast("紧急停止已触发");
+//
+//                    //更新按钮状态
+//                    btnStartReset.setEnabled(true);
+//                    btnStartReset.setText("已停止");
+//                    btnStartReset.setBackgroundTintList(ColorStateList.valueOf(activeColor));
+//                });
+//            } catch (Exception e) {
+//                Log.e("HandlerStop", "发送停止命令失败", e);
+//                handler.post(()->showError("紧急停止失败："+e.getMessage()));
+//            }
+//        });
+//    }
+
+
+    //退出按钮
+    private void sendQuitCommandToServer() {
+        executor.execute(() -> {
+            try {
+                //发送消息： {"cmdName":"quit"}
+                BaseCMD cmd = new BaseCMD("quit");
+                Gson gson = new Gson();
+                String jsonCmd = gson.toJson(cmd);
+                byte[] payload = jsonCmd.getBytes(StandardCharsets.UTF_8);
+
+                commandOutput.write(payload);
+                commandOutput.flush();
+                Log.e("Quit", "已发送退出命令: " + jsonCmd);
+
+                // 等待服务器响应
+                new Thread(() -> {
+                    try {
+                        char[] buffer = new char[1024];
+                        int bytesRead;
+                        StringBuilder response = new StringBuilder();
+
+                        // 设置读取超时（5秒）
+                        commandSocket.setSoTimeout(5000);
+
+                        while ((bytesRead = reader.read(buffer)) != -1) {
+                            response.append(buffer, 0, bytesRead);
+                            String fullResponse = response.toString();
+
+                            if (fullResponse.contains("}")) {
+                                // 解析响应
+                                BaseReplay replay = gson.fromJson(fullResponse, BaseReplay.class);
+                                if ("quit".equalsIgnoreCase(replay.getCmdName())) {
+                                    if (replay.getErrorCode().equals("0")) {
+                                        // 服务器确认退出
+                                        handler.post(() -> {
+                                            showToast("服务器已确认退出");
+                                            showExitConfirmationDialog();
+                                        });
+                                    } else {
+                                        // 服务器返回错误
+                                        handler.post(() -> {
+                                            showError("退出失败: " + replay.getErrorMsg());
+                                        });
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        Log.e("Quit", "读取退出响应失败", e);
+                        handler.post(() -> {
+                            showError("退出时发生错误: " + e.getMessage());
+                            // 即使出错也允许用户退出
+                            showExitConfirmationDialog();
+                        });
+                    }
+                }).start();
+            } catch (Exception e) {
+                Log.e("Quit", "发送退出命令失败", e);
+                handler.post(() -> {
+                    showError("发送退出命令失败: " + e.getMessage());
+                    // 即使出错也允许用户退出
+                    showExitConfirmationDialog();
+                });
+            }
+        });
+    }
+
+    // 显示退出确认对话框
+    private void showExitConfirmationDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("确认退出")
+                .setMessage("确定要退出应用程序吗？")
+                .setPositiveButton("确定", (dialog, which) -> {
+                    // 执行退出操作
+                    exitApplication();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    //退出应用程序
+    private void exitApplication(){
+        //断开所有连接
+        disconnect();
+        //关闭线程池
+        shutdownExecutors();
+        //退出应用
+        finishAffinity();
+        System.exit(0);
+    }
+
+
+    //关闭所有线程
+    private void shutdownExecutors() {
+        try {
+            if (executor != null && !executor.isShutdown()) {
+                executor.shutdownNow();
+                executor = Executors.newSingleThreadExecutor(); // 重新创建以备后续使用
+            }
+
+            if (movementExecutor != null && !movementExecutor.isShutdown()) {
+                movementExecutor.shutdownNow();
+                movementExecutor = Executors.newSingleThreadExecutor();//重新创建
+            }
+        } catch (Exception e) {
+            Log.e("Exit", "线程池关闭失败", e);
+        }
+    }
+
+
+    //处理电源开关
+    private void handlePowerControl() {
+        if (!isConnected){
+            showToast("请先连接机械臂");
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                String command = isPowerOn ? "power_off" : "power_on";
+                BaseCMD cmd = new BaseCMD(command);
+                Gson gson = new Gson();
+                Log.e("111", gson.toJson(cmd));
+                byte[] b = gson.toJson(cmd).getBytes(StandardCharsets.UTF_8);
+                commandOutput.write(b);
+                commandOutput.flush();
+
+                    Boolean resp = false;
+                    char[] chars = new char[1024];
+                    int index = 0;
+                    while (!resp) {
+                        try {
+                            index += reader.read(chars, index, chars.length - index);
+                            String s = new String(chars, 0, index);
+
+                            if (s.replaceAll("[\n\r]", "").endsWith("}")) {
+                                BaseReplay replay = gson.fromJson(s, BaseReplay.class);
+                                if (command.equalsIgnoreCase(replay.getCmdName()) && replay.getErrorCode().equals("0")) {
+                                    //更新电源状态
+                                    isPowerOn = !isPowerOn;
+                                    updateUI(() -> {
+                                        // 更新电源按钮样式
+                                        btnPowerOn.setBackgroundTintList(isPowerOn ? ColorStateList.valueOf(disabledColor)
+                                                : ColorStateList.valueOf(activeColor));
+                                        btnPowerOn.setText(isPowerOn ? "关闭电源" : "打开电源");
+
+                                        // 刷新所有按钮状态
+                                        enableControls(true);
+                                    });
+                                }
+                                resp = true;
+                            }
+                            Log.e("读取数据", s);
+                        } catch (Exception e) {
+                            Log.e("异常", "", e);
+                            showError("电源控制失败: " + e.getMessage());
+                        }
+                    }
+                    Log.e("线程执行完成", "33");
+
+            } catch (Exception e) {
+                handler.post(()-> showError("电源控制失败: " + e.getMessage()));
+            }
+        });
+    }
+
+
+    //处理机械臂使能控制
+    private void handleEnableRobotControl() {
+        Log.e("EnableRobot", "按钮点击");
+        //检查连接状态和电源状态
+        if (!isConnected) {
+            showToast("请先连接机械臂");
+            return;
+        }
+        if (!isPowerOn) {
+            showToast("请先打开电源");
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                String command = isEnableRobot ? "disable_robot" : "enable_robot";
+                BaseCMD cmd = new BaseCMD(command);
+                Gson gson = new Gson();
+                byte[] b = gson.toJson(cmd).getBytes(StandardCharsets.UTF_8);
+                commandOutput.write(b);
+                commandOutput.flush();
+
+                    Boolean rep = false;
+                    char[] chars = new char[1024];
+                    int index = 0;
+                    while (!rep) {
+                        try {
+                            index += reader.read(chars, index, chars.length - index);
+                            String s = new String(chars, 0, index);
+
+                            if (s.replaceAll("[\n\r]", "").endsWith("}")) {
+                                BaseReplay replay = gson.fromJson(s, BaseReplay.class);
+                                if (command.equalsIgnoreCase(replay.getCmdName()) && replay.getErrorCode().equals("0")) {
+
+                                    //更新状态并刷新UI
+                                    isEnableRobot = !isEnableRobot;
+                                    updateUI(() -> {
+                                        //更新使能按钮样式
+                                        btnEnableRobot.setBackgroundTintList(isEnableRobot ? ColorStateList.valueOf(disabledColor)
+                                                : ColorStateList.valueOf(activeColor));
+                                        btnEnableRobot.setText(isEnableRobot ? "机器人下使能" : "机器人上使能");
+                                        enableControls(true);
+                                    });
+                                }
+                                rep = true;
+                            }
+                            Log.e("读取数据", s);
+                        } catch (Exception e) {
+                            Log.e("异常", "", e);
+                            showError("使能控制失败: " + e.getMessage());
+                        }
+                    }
+                    Log.e("线程执行完成", "44");
+
+            } catch (Exception e) {
+                showError("2使能控制失败:" + e.getMessage());
+            }
+        });
+    }
+
+//    //更新电源按钮状态
+//    private void updatePowerButton() {
+//        updateUI(() -> {
+//            btnPowerOn.setBackgroundTintList(
+//                    isPowerOn ? ColorStateList.valueOf(Color.GRAY) :
+//                            ColorStateList.valueOf(Color.parseColor("#4CAF50"))
+//            );
+//            btnPowerOn.setText(isPowerOn ? "电源已开启" : "打开电源");
+//        });
+//    }
+//
+//
+//    //更新使能按钮状态
+//    private void updateEnableButton() {
+//        updateUI(() -> {
+//            btnEnableRobot.setBackgroundTintList(
+//                    isEnableRobot ? ColorStateList.valueOf(Color.GRAY) :
+//                            ColorStateList.valueOf(Color.parseColor("#4CAF50"))
+//            );
+//            btnEnableRobot.setText(isEnableRobot ? "已使能" : "机器人上使能");
+//        });
+//    }
+
+
+
+    //紧急停止按钮
+    private void handlerEmergencyStop() {
+        if (!isConnected) {
+            showToast("未连接机械臂");
+            return;
+        }
+        // 立即发送紧急停止指令
+        executor.execute(() -> {
+
+            try {
+                //发送停止命令
+                sendCommand(new Gson().toJson(new BaseCMD("stop_program")));
+
+                //立即更新状态
+                isMoving=false;
+                isResetting = false;//机械臂是否处于复位状态
+
+                //读取响应
+                //String response = readResponse();
+
+                updateUI(()->{
+                    Log.d("HandlerStop", "更新UI");
+                    tvStatus.append("\n机械臂已紧急停止");
+                    showToast("紧急停止已触发");
+
+                    //更新按钮状态
+                    btnStartReset.setEnabled(true);
+                    btnStartReset.setText("已停止");
+                    btnStartReset.setBackgroundTintList(ColorStateList.valueOf(activeColor));
+                });
+            } catch (Exception e) {
+                handler.post(()->showError("紧急停止失败："+e.getMessage()));
+            }
+
+        });
+    }
+
+    private void showText(String data){
+        handler.post(()->{
+            tvStatus.append("收到："+data+"\n");
+        });
+    }
+
+
+    // 开始复位按钮
+    private void handlerStartReset() {
+        isLongPress = false;
+        if (!isConnected) {
+            showToast("请先连接机械臂");
+            return;
+        }
+
+        if (!isPowerOn) {
+            showToast("请先打开电源");
+            return;
+        }
+
+        if (!isEnableRobot) {
+            showToast("请先使能机器人");
+            return;
+        }
+
+        if (isResetting) {
+            showToast("复位操作正在进行中");
+            return;
+        }
+        // 标记复位开始
+        isLongPressTriggered = true;
+        isResetting = true;
+
+        // 更新复位状态
+        isEmergencyStopped = false;
+
+        // 使用 updateUI 更新状态
+        updateUI(() -> {
+//            btnStartReset.setEnabled(false);
+            btnStartReset.setText("复位中...");
+            btnStartReset.setBackgroundTintList(ColorStateList.valueOf(disabledColor));
+            tvStatus.append("\n开始复位操作....");
+        });
+
+        executor.execute(() -> {
+            try {
+                // 发送复位指令
+                String command = restComd;
+                Gson gson = new Gson();
+                byte[] b = command.getBytes(StandardCharsets.UTF_8);
+                commandOutput.write(b);
+                commandOutput.flush();
+
+                jogRep = false;
+                // 更新复位状态
+                isRestOn = !isRestOn;
+                new Thread(() -> {
+                    char[] chars = new char[1024];
+                    int index = 0;
+                    while (!jogRep) {
+                        try {
+                            index += reader.read(chars, index, chars.length - index);
+                            String s = new String(chars, 0, index);
+
+                            if (s.replaceAll("[\n\r]", "").endsWith("}")) {
+                                BaseReplay replay = gson.fromJson(s, BaseReplay.class);
+                                if ("joint_move".equalsIgnoreCase(replay.getCmdName()) && replay.getErrorCode().equals("0")) {
+                                    updateUI(() -> {
+                                        //更新复位状态
+                                        isResetting=true;
+                                        isEmergencyStopped=false;
+                                        btnStartReset.setEnabled(true);
+                                        btnStartReset.setText("复位");
+                                        tvStatus.append("\n复位成功");
+                                        btnStartReset.setBackgroundTintList(ColorStateList.valueOf(enabledColor));
+                                        tvStatus.append("\n复位完成");
+                                        showToast("复位完成");
+                                    });
+                                }
+                                jogRep = true;
+                            }
+                            Log.e("读取数据", s);
+                        } catch (Exception e) {
+                            Log.e("异常", "", e);
+                            updateUI(()->{
+                                tvStatus.append("\n复位过程中发生错误："+e.getMessage());
+                            });
+                            showError("复位失败: " + e.getMessage());
+                        }
+                    }
+                    Log.e("线程执行完成", "66");
+                }).start();
+
+            } catch (Exception e) {
+                updateUI(()->{
+                    tvStatus.append("\n发送复位指令失败："+e.getMessage());
+                });
+                // 发生错误时停止松开检测
+                isLongPressTriggered = false;
+                isResetting=false;
+            }
+        });
+
+    }
+
+
+    private boolean jogRep = true;
+
+//    private void sendJog() {
+//        if (!isConnected || !isPowerOn || !isEnableRobot) {
+//            showToast("请先连接并启用机械臂");
+//            return;
+//        }
+//        executor.execute(() -> {
+//            try {
+////                {"cmdName":"jog","jog_mode":0, "coord_map":1, "jnum":1}
+//                // 发送复位指令----确定选择了哪个按钮
+//                int selectedID = radioGroupArm.getCheckedRadioButtonId();
+//                String command = (selectedID == R.id.rb_right_arm) ? "jog_left" :
+//                        (selectedID == R.id.rb_left_arm) ? "jog_right" : "jog_stop";
+//                JogCMD cmd = new JogCMD(command, 1, 0, 30);
+//                cmd.setJnum(0);
+//                Gson gson = new Gson();
+//                byte[] b = gson.toJson(cmd).getBytes(StandardCharsets.UTF_8);//解决了发送命令时的分包问题
+//                commandOutput.write(b);
+//                commandOutput.flush();
+//
+//                jogRep = false;
+//                // 更新复位状态
+//                isRestOn = !isRestOn;
+//                new Thread(() -> {
+//                    char[] chars = new char[1024];
+//                    int index = 0;
+//                    while (!jogRep) {
+//                        try {
+//                            index += reader.read(chars, index, chars.length - index);
+//                            String s = new String(chars, 0, index);
+//
+//                            if (s.replaceAll("[\n\r]", "").endsWith("}")) {
+//                                BaseReplay replay = gson.fromJson(s, BaseReplay.class);
+//                                if (replay.getCmdName().toLowerCase().equals("jog") && replay.getErrorCode().equals("0")) {
+//                                    //todo
+//                                }
+//                                jogRep = true;
+//                            }
+//                            Log.e("读取数据", s);
+//                        } catch (Exception e) {
+//                            Log.e("异常", "", e);
+//                            showError("复位失败: " + e.getMessage());
+//                        }
+//                    }
+//                    Log.e("线程执行完成", "66");
+//                }).start();
+//            } catch (Exception e) {
+//                showError("复位失败: " + e.getMessage());
+//            }
+//        });
+//    }
+
+
+
+    //处理两个端口的监听和数据传输
+    private static final int CONTROL_PORT = 10001;  //控制端口
+    private static final int STATUS_PORT = 10000;  //状态端口
+    private boolean isRunning = false;
+    private ServerSocket controlServerSocket;
+    private ServerSocket statusServerSocket;
+
+
+    public abstract class ControlService extends Service {
+        @Override
+        public int onStartCommand(Intent intent, int flags, int startId) {
+            startServer();
+            return Service.START_STICKY_COMPATIBILITY;
+        }
+
+        private void startServer() {
+            isRunning = true;
+            // 控制端口监听线程
+            new Thread(() -> {
+                try {
+                    controlServerSocket = new ServerSocket(CONTROL_PORT);
+                    while (isRunning) {
+                        Socket clientSocket = controlServerSocket.accept();
+                        handleControlClient(clientSocket);
+                    }
+                } catch (Exception e) {
+                    Log.e("Server", "控制端口异常", e);
+                }
+            }).start();
+
+            // 状态端口监听线程
+            new Thread(() -> {
+                try {
+                    statusServerSocket = new ServerSocket(STATUS_PORT);
+                    while (isRunning) {
+                        Socket clientSocket = statusServerSocket.accept();
+                        handleStatusClient(clientSocket);
+                    }
+                } catch (Exception e) {
+                    Log.e("Server", "状态端口异常", e);
+                }
+            }).start();
+        }
+    }
+
+
+    private void handleStatusClient(Socket clientSocket) {
+        executor.execute(() -> {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(clientSocket.getInputStream()))) {
+                String status;
+                while ((status = reader.readLine()) != null) {
+                    // 解析并处理状态数据（例如更新UI）
+                    Log.e("StatusClient", "收到状态: " + status);
+                    processStatus(status); // 调用现有的状态处理方法
+                }
+            } catch (Exception e) {
+                Log.e("StatusClient", "处理失败", e);
+            }
+        });
+    }
+
+    // 处理控制指令
+    private void handleControlClient(Socket socket) {
+        executor.execute(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+                String command;
+                while ((command = reader.readLine()) != null) {
+                    Log.e("Control", "收到指令: " + command);
+                    // 执行机械臂控制逻辑（如调用硬件接口）
+                    sendStatus("EXECUTING:" + command); // 推送状态
+                }
+            } catch (Exception e) {
+                Log.e("Control", "指令处理失败", e);
+            }
+        });
+    }
+
+    // 主动发送状态
+    private void sendStatus(String status) {
+        executor.execute(() -> {
+            try (Socket statusSocket = new Socket("客户端IP", STATUS_PORT);
+                 PrintWriter writer = new PrintWriter(statusSocket.getOutputStream(), true)) {
+                writer.println(status);
+            } catch (Exception e) {
+                Log.e("Status", "状态发送失败", e);
+            }
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        // 移除所有空闲检测回调
+        idleHandler.removeCallbacksAndMessages(null);
+
+        // 移除所有UI更新回调
+        handler.removeCallbacksAndMessages(null);
+
+        // 取消长按检测
+        longPressHandler.removeCallbacksAndMessages(null);
+
+        // 设置标志位，防止后台线程更新UI
+        isLongPressTriggered = false;
+
+        // 取消正在执行的任务
+        if (executor != null) {
+            executor.shutdownNow();
+        }
+
+        // 断开连接并释放所有资源
+        try {
+            if (isConnected){
+                sendQuitCommandToServer();//通知服务端
+                disconnect();
+            }
+        } catch (Exception e) {
+            Log.e("Shutdown","断开连接异常",e);
+        } finally {
+            shutdownExecutors();
+        }
+        super.onDestroy();
+    }
+
+    // 关闭Socket相关资源
+    private void closeSocketResources() {
+        try {
+            if (reader != null) {
+                reader.close();
+            }
+            if (commandOutput != null) {
+                commandOutput.close();
+            }
+            if (commandSocket != null) {
+                commandSocket.close();
+            }
+        } catch (IOException e) {
+            Log.e("Socket", "关闭资源失败", e);
+        }
+    }
+
+
+    //尝试建立连接
+    private void attemptConnection() {
+        if (!isConnected){
+            disconnect();
+        }
+
+        updateUI(() -> btnConnect.setText("连接中..."));
+        resetIdleTimer(); // 重置计时器
+
+        executor.execute(() -> {
+            try {
+                // 关闭旧连接
+                if (commandSocket != null && !commandSocket.isClosed()) {
+                    commandSocket.close();
+                }
+
+                // 创建新连接
+                commandSocket = new Socket();
+                commandSocket.connect(new InetSocketAddress(currentArmIp, CONTROL_PORT), 3000);
+//                commandSocket.setSoTimeout(3000); //读取超时3秒
+                commandOutput = new DataOutputStream(commandSocket.getOutputStream());
+                isConnected = true;
+                reader = new BufferedReader(new InputStreamReader(commandSocket.getInputStream()));
+
+                // 连接成功后更新状态
+                synchronized (this) {
+                    isConnected = true;
+                    robotStatus();
+//                    connectStatusPort(); // 新增状态端口连接
+                }
+
+                //更新UI状态
+                updateUI(() -> {
+                    btnConnect.setText("断开连接");
+                    tvStatus.setText("已连接："+currentArmIp);
+                    enableControls(true);
+                    showToast("连接成功");
+                });
+
+            } catch (SocketTimeoutException e) {
+                showError("连接超时，请检查IP和端口");
+            } catch (ConnectException e) {
+                showError("连接被拒绝，服务器未运行");
+            } catch (IOException e) {
+                showError("网络错误: " + e.getMessage());
+            }
+            resetIdleTimer(); // 重置计时器
+        });
+    }
+
+    //重新建立连接
+    private boolean attemptReconnect() {
+        int retries = 0;
+        long retryDelay = 1000;//初始延迟1秒
+
+        while (retries++ < 10) {
+            cleanupConnection();//确保前次连接资源释放
+
+            try {
+                // 非首次尝试时添加延迟
+                if (retries > 0) {
+                    Log.e("Reconnect", "等待 " + retryDelay + "ms 后重试...");
+                    // 指数退避：每次延迟时间翻倍（最大不超过30秒）
+                    retryDelay = Math.min(retryDelay * 2, 30000);
+                }
+                //建立Socket连接
+                Log.e("Reconnect","尝试第" + (retries + 1) + "次连接");
+                commandSocket = new Socket();
+                commandSocket.connect(new InetSocketAddress(currentArmIp, CONTROL_PORT), 3000);
+
+                //初始化数据
+                commandOutput = new DataOutputStream(commandSocket.getOutputStream());
+                reader = new BufferedReader(new InputStreamReader(commandSocket.getInputStream()));
+
+                //通过socket状态判断是否连接成功
+                if (commandSocket.isConnected() && !commandSocket.isClosed()){
+                    isConnected = true;
+                    Log.i("Reconnect","连接成功");
+                    return true;
+                }
+            } catch (ConnectException e) {
+                Log.e("Reconnect","连接被拒绝:" + e.getMessage());
+                break;//服务器拒绝时立即终止
+            }catch (SocketTimeoutException e){
+                Log.w("Reconnect","连接超时（目标IP:" + currentArmIp +"）");
+            }catch (IOException e){
+                Log.e("Reconnect","网络异常：" +e.getMessage());
+            }finally {
+                retries++;
+            }
+        }
+        Log.e("Reconnect","重连失败，已达最大尝试次数");
+        return false;
+    }
+
+    // 断开连接
+    private void disconnect() {
+        if (!isConnected)
+            return;
+
+        try {
+            isConnected = false;
+            isPowerOn = false;
+            isEnableRobot = false;
+
+            //关闭输出流
+            if (commandOutput != null) {
+                commandOutput.close();
+                commandOutput = null;
+            }
+
+            //关闭Socket
+            if (commandSocket != null) {
+                commandSocket.close();
+                commandSocket = null;
+            }
+
+            if (reader != null){
+                reader.close();
+            }
+
+            //更新UI信息
+            updateUI(() -> {
+                btnConnect.setText("连接");
+                tvStatus.setText("未连接");
+                enableControls(false);
+
+                // 重置复位状态
+                isResetting = false;
+                isEmergencyStopped = false;
+
+                //重置电源和使能按钮状态
+                btnPowerOn.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#4CAF50")));
+                btnPowerOn.setText("打开电源");
+                btnEnableRobot.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#4CAF50")));
+                btnEnableRobot.setText("机器人上使能");
+            });
+        } catch (Exception e) {
+            Log.e("Connection", "断开连接错误", e);
+        }
+    }
+
+
+
+    //安全释放连接资源
+    private void cleanupConnection(){
+        try {
+            if (commandSocket != null){
+                if (!commandSocket.isClosed()){
+                    commandSocket.close();
+                }
+                commandSocket = null;
+            }
+            if (commandOutput != null){
+                commandOutput.close();
+                commandOutput = null;
+            }
+            if (reader != null){
+                reader.close();
+                reader = null;
+            }
+        }catch (IOException e){
+            Log.w("Cleanup","资源释放异常",e);
+        }finally {
+            isConnected = false;
+        }
+    }
+
+
+    // 处理状态信息
+    private void processStatus(String jsonData) {
+        resetIdleTimer(); // 添加这行：接收到状态数据也算操作
+
+        try {
+            Gson gson = new Gson();
+            StatusData statusData = gson.fromJson(jsonData, StatusData.class);
+
+            // 更新关节角度
+            for (int i = 0; i < statusData.joints.length && i < 6; i++) {
+                final float angle = statusData.joints[i];
+                final int jointIndex = i;
+                runOnUiThread(() -> {
+                    tvJointAngles[jointIndex].setText(String.format("%.1f°", angle));
+                    pbJoints[jointIndex].setProgress((int) angle);
+                });
+            }
+
+            // 更新状态信息
+            if (statusData.state != null) {
+                final String state = statusData.state;
+                runOnUiThread(() -> tvStatus.append("状态: " + state + "\n"));
+            }
+        } catch (Exception e) {
+            Log.e("Status", "解析失败: " + jsonData, e);
+        }
+    }
+
+    // 添加状态数据模型类
+    class StatusData {
+        float[] joints;
+        String state;
+    }
+
+
+    //控制服务端进程（监听10001）
+    private void StartControlServer() {
+        new Thread(() -> {
+            try (ServerSocket serverSocket = new ServerSocket(CONTROL_PORT)) {
+                while (isConnected) {
+                    Socket clientSocket = serverSocket.accept();
+                    handleClient(clientSocket); // 处理客户端连接
+                }
+            } catch (Exception e) {
+                Log.e("ControlServer", "服务端异常", e);
+            }
+        }).start();
+    }
+
+
+    private void handleClient(Socket clientSocket) {
+        new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(clientSocket.getInputStream()))) {
+                String command;
+                while ((command = reader.readLine()) != null) {
+                    // 处理控制指令（例如更新角度）
+                    processControlCommand(command);
+                }
+            } catch (Exception e) {
+                Log.e("ControlServer", "指令处理失败", e);
+            }
+        }).start();
+
+    }
+
+
+    private void processControlCommand(String command) {
+        //更新机械臂角度
+        if (command.startsWith("SET_ANGLES:")) {
+            String[] parts = command.split(":");
+            float[] angles = paresAngles(parts[1]); //解析角度
+        }
+    }
+
+    private float[] paresAngles(String data) {
+        String[] parts = data.split(";");
+        float[] angles = new float[6];
+        for (int i = 0; i < 6; i++) {
+            String angleStr = parts[i + 1].split("=")[1];
+            angles[i] = Float.parseFloat(angleStr);
+        }
+        return angles;
+    }
+
+
+    // 控制UI状态
+    private void enableControls(boolean enabled) {
+        // 启用/禁用其他控制按钮
+        findViewById(R.id.btn_start_reset).setEnabled(enabled);
+        findViewById(R.id.btn_emergency_stop).setEnabled(enabled);
+
+        updateUI(() -> {
+             //将颜色值转换为ColorStateList
+            final ColorStateList activeState = ColorStateList.valueOf(activeColor); // 蓝色
+            final ColorStateList enabledState = ColorStateList.valueOf(enabledColor); // 绿色
+            final ColorStateList disabledState = ColorStateList.valueOf(disabledColor); // 灰色
+
+            // 连接按钮状态控制
+            btnConnect.setBackgroundTintList(isConnected ? activeState : enabledState);// 未连接显示绿色
+            btnConnect.setText(isConnected ? "断开连接" : "连接");
+
+            // 电源按钮状态逻辑
+            btnPowerOn.setEnabled(isConnected);
+            btnPowerOn.setBackgroundTintList(isConnected ? (isPowerOn ? activeState : enabledState) :disabledState);
+            btnPowerOn.setText(isPowerOn ? "关闭电源" : "打开电源");
+
+            // 使能按钮状态逻辑
+            btnEnableRobot.setEnabled(isConnected && isPowerOn);
+            btnEnableRobot.setBackgroundTintList((isConnected && isPowerOn) ? (isEnableRobot ? activeState : enabledState) : disabledState);
+            btnEnableRobot.setText(isEnableRobot ? "机器人下使能" : "机器人上使能");
+
+            // 开始复位按钮
+            boolean resetEnabled = isConnected && isPowerOn && isEnableRobot;
+            btnStartReset.setEnabled(resetEnabled);
+            if (isResetting) {
+                // 复位中状态
+                btnStartReset.setText("复位中...");
+                btnStartReset.setBackgroundTintList(ColorStateList.valueOf(disabledColor));
+            } else if (isEmergencyStopped) {
+                // 紧急停止状态
+                btnStartReset.setText("已停止");
+                btnStartReset.setBackgroundTintList(ColorStateList.valueOf(activeColor));
+            } else {
+                // 正常状态
+                btnStartReset.setText("开始复位");
+                btnStartReset.setBackgroundTintList(resetEnabled ? enabledState : disabledState);
+            }
+
+            // 紧急停止按钮（保持红色）
+            btnEmergencyStop.setEnabled(enabled && isConnected);
+            btnEmergencyStop.setBackgroundTintList(isConnected ? ColorStateList.valueOf(Color.RED) : disabledState);
+
+            // 服务器重启按钮
+            btnRebootServer.setEnabled(enabled && isConnected);
+            btnRebootServer.setBackgroundTintList(isConnected ? enabledState : disabledState);
+
+            // 退出按钮（始终启用）
+            btnQuit.setEnabled(true);
+            btnQuit.setBackgroundTintList(enabledState); // 保持绿色
+        });
+    }
+
+    // 线程安全更新UI
+    private void updateUI(Runnable action) {
+        if (!isFinishing() && !isDestroyed()) {
+            handler.post(() -> {
+                if (!isFinishing() && !isDestroyed()) {
+                    action.run();
+                }
+            });
+        }
+    }
+
+    private void showToast(String message) {
+        handler.post(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
+    }
+
+    private void showError(String message) {
+        handler.post(() -> {
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            tvStatus.setText("错误: " + message);
+        });
+    }
+
+
+    //关节角度
+    private String leftCmd = "{\"cmdName\":\"joint_move\",\"relFlag\":0,\"jointPosition\":[47.05,36.773,117.735,-111.044,78.636,202.127],\"speed\":10,\"accel\":1}";
+    private final float[] leftArmAngles = {47.050f, 36.773f, 117.735f, -111.044f, 78.636f, 202.127f};//左臂六个关节
+    private String rightCmd = "{\"cmdName\":\"joint_move\",\"relFlag\":0,\"jointPosition\":[346.841, -61.494, -113.348, 149.534, -85.067, -120.000],\"speed\":10,\"accel\":10}";
+    private final float[] rightArmAngles = {346.841f, -61.494f, -113.348f, 149.534f, -85.067f, -120.000f};//右臂六个关节
+
+    //ui控件引用
+    private RadioGroup radioGroupArm;
+    private TextView[] tvJointAngles = new TextView[6];
+    private ProgressBar[] pbJoints = new ProgressBar[6];
+
+
+    //实现选择监听与数据更新
+    private void setupRadioGroupListener() {
+        radioGroupArm.setOnCheckedChangeListener((group, checkedId) -> {
+            currentArmIp =(checkedId == R.id.rb_right_arm) ?  RIGHT_ARM_IP : LEFT_ARM_IP;
+            //连接成功自动切换ip
+            if (isConnected){
+                disconnect();
+                new Handler().postDelayed(this::attemptConnection,500);
+            }
+            updateJointAnglesDisplay(); // 用户切换时更新显示
+        });
+    }
+
+    private String restComd=rightCmd;
+    private void updateJointAnglesDisplay() {
+        //获取当前选择的臂
+        boolean isRightArmSelected = (radioGroupArm.getCheckedRadioButtonId() == R.id.rb_right_arm);
+        float[] angles = isRightArmSelected ? leftArmAngles : rightArmAngles;
+        restComd = isRightArmSelected ? rightCmd : leftCmd;
+        //更新每个关节的显示
+        for (int i = 0; i < 6; i++) {
+            float angle = angles[i];
+
+            //设置角度文本（保留三位小数）
+            tvJointAngles[i].setText(String.format("%.3f°", angles[i]));
+
+            //设置进度条
+            pbJoints[i].setProgress((int) angle);
+        }
+    }
+
+
+//    //集中资源关闭方法
+//    private void safeClose(Socket s, DataOutputStream o, BufferedReader r) {
+//        try {
+//            if (o != null) o.close();
+//            if (r != null) r.close();
+//            if (s != null) s.close();
+//        } catch (IOException e) {
+//            Log.e("SafeClose", "临时资源关闭失败", e);
+//        }
+//    }
+
+
+    //添加状态轮询定时器
+    private Handler statusHandle = new Handler(Looper.getMainLooper());
+    private Runnable statusRunnable = new Runnable() {
+        @Override
+        public void run() {
+            statusHandle.postDelayed(this,3000);//每3秒轮询一次
+        }
+    };
+
+    //命令响应处理同步信息
+    private synchronized void sendCommand(String jsonCommand) throws IOException{
+        Log.d("Command", "准备发送命令: " + jsonCommand);
+        commandOutput.write(jsonCommand.getBytes(StandardCharsets.UTF_8));
+        commandOutput.flush();
+        Log.d("Command", "命令已发送");
+    }
+
+
+    private synchronized String readResponse() throws IOException{
+        Log.d("Command", "开始读取响应");
+        StringBuilder response = new StringBuilder();
+        char[] buffer = new char[1024];
+        int bytesRead;
+        while ((bytesRead =reader.read(buffer)) !=-1){
+            response.append(buffer,0,bytesRead);
+            Log.d("Command", "读取到部分响应: " + response);
+            if (response.toString().contains("}")){
+                Log.d("Command", "读取到完整响应: " + response);
+                break;
+            }
+        }
+        return response.toString();
+    }
+
+
+    private Socket statusSocket;
+    private BufferedReader statusReader;
+    private Thread statusThread;
+
+
+    //状态端口---10000端口
+//    private void connectStatusPort() {
+//        executor.execute(() -> {
+//            try {
+//                statusSocket = new Socket();
+//                // 设置连接超时
+//                statusSocket.connect(new InetSocketAddress(currentArmIp, STATUS_PORT), 3000);
+//
+//                // 设置读取超时，防止永久阻塞
+//                statusSocket.setSoTimeout(5000);
+//
+//                statusReader = new BufferedReader(new InputStreamReader(statusSocket.getInputStream()));
+//                isStatusListening = true;
+//
+//                startStatusListening();
+//
+//                runOnUiThread(() -> showToast("状态端口连接成功"));
+//            } catch (SocketTimeoutException e) {
+//                runOnUiThread(() -> showError("状态端口连接超时"));
+//            } catch (ConnectException e) {
+//                runOnUiThread(() -> showError("状态端口连接被拒绝"));
+//            } catch (IOException e) {
+//                runOnUiThread(() -> showError("状态端口连接失败: " + e.getMessage()));
+//            }
+//        });
+//    }
+
+//    // 状态监听线程
+//    private void startStatusListening() {
+//        statusThread = new Thread(() -> {
+//            try {
+//                while (isStatusListening && !Thread.currentThread().isInterrupted()) {
+//                    String statusData = statusReader.readLine();
+//                    if (statusData == null) {
+//                        // 流结束，可能是连接关闭
+//                        break;
+//                    }
+//
+//                    if (!statusData.isEmpty()) {
+//                        Log.e("StatusData", "收到状态: " + statusData);
+//                        processStatus(statusData);
+//                    }
+//                }
+//            } catch (SocketTimeoutException e) {
+//                // 正常超时，继续监听
+//            } catch (IOException e) {
+//                if (isStatusListening) {
+//                    Log.e("Status", "读取失败", e);
+//                    runOnUiThread(() -> showError("状态读取失败: " + e.getMessage()));
+//                }
+//            } finally {
+//                Log.e("Status", "状态监听线程结束");
+//            }
+//        });
+//        statusThread.setName("Status-Listener");
+//        statusThread.start();
+//    }
+
+
+
+    private static final long IDLE_TIMEOUT = 60 * 1000; // 1分钟
+    private Handler idleHandler = new Handler(Looper.getMainLooper());
+    private Runnable idleRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isConnected) {
+                runOnUiThread(() -> showToast("无操作超时，自动断开连接"));
+                disconnect();
+            }
+        }
+    };
+
+    // 在用户操作时调用此方法重置计时器
+    private void resetIdleTimer() {
+        idleHandler.removeCallbacks(idleRunnable);
+        idleHandler.postDelayed(idleRunnable, IDLE_TIMEOUT);
+    }
+
+    // 关闭控制端口资源
+    private void closeCommandPortResources() {
+        try {
+            if (commandSocket != null) {
+                commandSocket.close();
+                commandSocket = null;
+            }
+
+            if (commandOutput != null) {
+                commandOutput.close();
+                commandOutput = null;
+            }
+
+            if (reader != null) {
+                reader.close();
+                reader = null;
+            }
+        } catch (IOException e) {
+            Log.e("Disconnect", "控制端口资源关闭异常", e);
+        }
+    }
+
+    //关闭状态端口资源
+    private void closeStatusPortResources() {
+        try {
+            // 中断状态监听线程
+            if (statusThread != null) {
+                statusThread.interrupt();
+                statusThread = null;
+            }
+
+            // 关闭状态读取器
+            if (statusReader != null) {
+                statusReader.close();
+                statusReader = null;
+            }
+
+            // 关闭状态Socket
+            if (statusSocket != null) {
+                statusSocket.close();
+                statusSocket = null;
+            }
+        } catch (IOException e) {
+            Log.e("Disconnect", "状态端口资源关闭异常", e);
+        }
+    }
+
+
+
+    //获取机器人状态
+    public void robotStatus() {
+        if (!isConnected) {
+            showToast("请先连接机械臂");
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                // 发送请求
+                BaseCMD cmd = new BaseCMD("get_robot_state");
+                Gson gson = new Gson();
+                String jsonCmd = gson.toJson(cmd);
+                commandOutput.write(jsonCmd.getBytes(StandardCharsets.UTF_8));
+                commandOutput.flush();
+
+                // 读取响应
+                StringBuilder response = new StringBuilder();
+                char[] buffer = new char[1024];
+                int bytesRead;
+                while ((bytesRead = reader.read(buffer)) != -1) {
+                    response.append(buffer, 0, bytesRead);
+                    if (response.toString().contains("}")) break; // 确保读到完整 JSON
+                }
+
+                // 解析响应
+                String rawJson = response.toString();
+                String fixedJson = rawJson
+                        .replace("<robot_enabled>", "\"robot_enabled\"")
+                        .replace("<powered_on>", "\"powered_on\"");
+                Log.e("Status", "Fixed JSON: " + fixedJson);
+
+                if (!isPowerOn && isEnableRobot){
+                    sendCommand(new Gson().toJson(new BaseCMD("disable_robot")));
+                    isEnableRobot=false;
+                }
+
+                BaseReplay replay = gson.fromJson(fixedJson, BaseReplay.class);
+                if (replay != null && "get_robot_state".equals(replay.getCmdName()) && "0".equals(replay.getErrorCode())) {
+
+                    //更新状态
+                    isPowerOn = "powered_on".equalsIgnoreCase(replay.getPower());
+                    isEnableRobot = "robot_enabled".equalsIgnoreCase(replay.getEnable());
+
+                    // 更新UI
+                    updateUI(() -> {
+                        //将颜色值转换为ColorStateList
+                        final ColorStateList activeState = ColorStateList.valueOf(activeColor); // 蓝色
+                        final ColorStateList enabledState = ColorStateList.valueOf(enabledColor); // 绿色
+                        final ColorStateList disabledState = ColorStateList.valueOf(disabledColor); // 灰色
+
+                        // 电源按钮状态逻辑
+                        btnPowerOn.setEnabled(isConnected);
+                        btnPowerOn.setBackgroundTintList(isConnected ? (isPowerOn ? activeState : enabledState) :disabledState);
+                        btnPowerOn.setText(isPowerOn ? "关闭电源" : "打开电源");
+
+                        // 使能按钮状态逻辑
+                        btnEnableRobot.setEnabled(isConnected && isPowerOn);
+                        btnEnableRobot.setBackgroundTintList((isConnected && isPowerOn) ? (isEnableRobot ? activeState : enabledState) : disabledState);
+                        btnEnableRobot.setText(isEnableRobot ? "机器人下使能" : "机器人上使能");
+
+                        // 开始复位按钮
+                        boolean resetEnabled = isConnected && isPowerOn && isEnableRobot;
+                        btnStartReset.setEnabled(resetEnabled);
+                        if (isResetting) {
+                            // 复位中状态
+                            btnStartReset.setText("复位中...");
+                            btnStartReset.setBackgroundTintList(ColorStateList.valueOf(disabledColor));
+                        } else if (isEmergencyStopped) {
+                            // 紧急停止状态
+                            btnStartReset.setText("已停止");
+                            btnStartReset.setBackgroundTintList(ColorStateList.valueOf(activeColor));
+                        } else {
+                            // 正常状态
+                            btnStartReset.setText("开始复位");
+                            btnStartReset.setBackgroundTintList(resetEnabled ? enabledState : disabledState);
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                Log.e("get_robot_status", "Error: ", e);
+                handler.post(() -> showError("获取状态失败: " + e.getMessage()));
+            }
+        });
+    }
+}
